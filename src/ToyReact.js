@@ -1,36 +1,77 @@
 window.ranges = [];
 class ElementWrapper {
   constructor(type) {
-    this.root = document.createElement(type);
+    this._type = type;
+    this.props = Object.create(null);
+    this.vchildren = [];
   }
+
+  get type() {
+    return this._type;
+  }
+
+  get vdom() {
+    return this;
+  }
+
   setAttribute(key, val) {
-    if (key.match(/^on([\s\S]+)/)) {
-      return this.root.addEventListener(RegExp.$1.toLocaleLowerCase(), val);
-    } else if (key === "className") {
-      key = "class";
+    this.props[key] = val;
+  }
+
+  mountTo(range, isUpdate) {
+    console.log(isUpdate);
+    this.range = range;
+    this.range.deleteContents();
+
+    const element = document.createElement(this.type);
+    for (let key in this.props) {
+      if (key.match(/^on([\s\S]+)/)) {
+        element.addEventListener(
+          RegExp.$1.toLocaleLowerCase(),
+          this.props[key]
+        );
+      } else {
+        if (key === "className") {
+          element.setAttribute("class", this.props[key]);
+        } else {
+          element.setAttribute(key, this.props[key]);
+        }
+      }
     }
-    this.root.setAttribute(key, val);
+
+    this.vchildren.forEach((vchild) => {
+      const range = document.createRange();
+      if (element.children.length) {
+        range.setStartAfter(element.lastChild);
+        range.setEndAfter(element.lastChild);
+      } else {
+        range.setStart(element, 0);
+        range.setEnd(element, 0);
+      }
+      vchild.mountTo(range);
+    });
+    range.insertNode(element);
+    if (isUpdate) {
+      // 由于range.deleteContents 会使得相邻的range 的startOffset被减少了，所以要加回去
+      const rangeIndex = window.ranges.indexOf(range);
+      const nextRange = window.ranges[rangeIndex + 1];
+      const siblingEl = element.nextElementSibling;
+      siblingEl && nextRange.selectNode(siblingEl);
+    }
   }
-  mountTo(range) {
-    range.deleteContents();
-    range.insertNode(this.root);
-  }
+
   appendChild(vchild) {
-    const range = document.createRange();
-    if (this.root.children.length) {
-      range.setStartAfter(this.root.lastChild);
-      range.setEndAfter(this.root.lastChild);
-    } else {
-      range.setStart(this.root, 0);
-      range.setEnd(this.root, 0);
-    }
-    vchild.mountTo(range);
+    this.vchildren.push(vchild);
   }
 }
 
 class TextWrapper {
-  constructor(type) {
-    this.root = document.createTextNode(type);
+  constructor(content) {
+    this.root = document.createTextNode(content);
+    this._type = "#text";
+  }
+  get type() {
+    return this._type;
   }
   mountTo(range) {
     range.deleteContents();
@@ -43,6 +84,11 @@ class Component {
     this.children = [];
     this.props = Object.create(null);
   }
+
+  get type() {
+    return this.constructor.name;
+  }
+
   setAttribute(key, val) {
     if (key.match(/^on([\s\S]+)/)) {
       console.log(RegExp.$1);
@@ -50,27 +96,73 @@ class Component {
     this.props[key] = val;
     this[key] = val;
   }
+
   mountTo(range) {
     this.range = range;
     window.ranges.push(range);
     this.update();
   }
-  update(isUpdate) {
-    this.range.deleteContents();
-    const vdom = this.render();
-    vdom.mountTo(this.range);
-    if (isUpdate) {
-      // 由于range.deleteContents 会使得相邻的range 的startOffset被减少了，所以要加回去
-      const rangeIndex = window.ranges.indexOf(this.range);
-      const nextRange = window.ranges[rangeIndex + 1];
-      if (
-        nextRange &&
-        nextRange.commonAncestorContainer === this.range.commonAncestorContainer
-      ) {
-        nextRange.setStart(nextRange.startContainer, nextRange.startOffset + 1);
-        nextRange.setEnd(nextRange.endContainer, nextRange.endOffset);
-      }
+  update() {
+    const vdom = this.vdom;
+    if (this.oldVdom) {
+      console.log("new:", vdom);
+      console.log("old:", this.oldVdom);
+      const isSameNode = (node1, node2) => {
+        if (node1.type !== node2.type) {
+          return false;
+        }
+        for (let name in node1.props) {
+          if (
+            typeof node1.props[name] === "object" &&
+            typeof node2.props[name] === "object" &&
+            JSON.stringify(node1.props[name]) ===
+              JSON.stringify(node2.props[name])
+          ) {
+            continue;
+          }
+          if (node1.props[name] !== node2.props[name]) {
+            return false;
+          }
+        }
+        if (
+          Object.keys(node1.props).length !== Object.keys(node2.props).length
+        ) {
+          return false;
+        }
+        return true;
+      };
+      const isSameTree = (node1, node2) => {
+        if (!isSameNode(node1, node2)) {
+          return false;
+        }
+        if (node1.children.length !== node2.children.length) {
+          return false;
+        }
+        for (let i = 0; i < node1.children.length; i++) {
+          if (!isSameTree(node1.children[i], node2.children[i])) {
+            return false;
+          }
+        }
+        return true;
+      };
+      const replace = (newTree, oldTree) => {
+        if (isSameTree(newTree, oldTree)) {
+          return;
+        }
+        if (!isSameNode(newTree, oldTree)) {
+          newTree.mountTo(oldTree.range, true);
+        } else {
+          for (let i = 0; i < newTree.children.length; i++) {
+            replace(newTree.children[i], oldTree.children[i]);
+          }
+        }
+      };
+
+      replace(vdom, this.oldVdom);
+    } else {
+      vdom.mountTo(this.range);
     }
+    this.oldVdom = vdom;
   }
   appendChild(vdom) {
     this.children.push(vdom);
@@ -93,6 +185,9 @@ class Component {
     }
     merge(this.state, state);
     this.update(true);
+  }
+  get vdom() {
+    return this.render().vdom;
   }
 }
 
